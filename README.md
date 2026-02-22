@@ -3,31 +3,43 @@
 A streaming Python gateway that sits in front of any `/chat/completions` API, detects reasoning tokens from reasoning-capable LLMs, and returns an enriched SSE response with:
 
 1. **Prompt Summary** – concise summary of the user's request
-2. **Reasoning Summary** – distilled version of the model's chain-of-thought
+2. **Reasoning Summaries** – incremental, step-by-step distillation of the model's chain-of-thought, streamed in real-time as the model thinks
 3. **Final Output** – the model's actual response
 
 ## Architecture
 
 ```
-                    ┌──────────────────────────────────────┐
-                    │          Gateway Server (:8000)       │
-                    │                                      │
-  Client ──SSE──▶  │  ┌─────────────┐  ┌──────────────┐  │
-                    │  │  Prompt      │  │  Upstream     │  │
-                    │  │  Summariser  │  │  Streamer     │  │
-                    │  │  (parallel)  │  │  + Reasoning  │  │
-                    │  │             │  │  Detector     │  │
-                    │  └──────┬──────┘  └──────┬───────┘  │
-                    │         │                │          │
-                    │         ▼                ▼          │
-                    │  ┌─────────────────────────────┐    │
-                    │  │     Stream Processor         │    │
-                    │  │  Phase 1 → Phase 2 → Phase 3 │    │
-                    │  └──────────────┬──────────────┘    │
-                    └─────────────────┼────────────────────┘
-                                      │
-                                      ▼ SSE
-                                   Client
+                          ┌──────────────────────────────────────────────────┐
+                          │              Gateway Server (:8000)               │
+                          │                                                  │
+  POST /sessions/warm ──▶ │  ┌─────────────────┐                            │
+  (optional, pre-warms)   │  │ Session Manager  │◄── KV cache warm + cached  │
+                          │  │ (in-memory TTL)  │    prompt summary          │
+                          │  └────────┬────────┘                            │
+                          │           │ session_id lookup                    │
+  Client ──POST──▶        │  ┌────────▼────────┐    ┌──────────────────┐   │
+                          │  │ Prompt Summariser│    │ Upstream Producer │   │
+                          │  │ (parallel/cached)│    │ (async reader)   │   │
+                          │  └────────┬────────┘    └────────┬─────────┘   │
+                          │           │                      │              │
+                          │           │         ┌────────────▼──────────┐   │
+                          │           │         │ Reasoning Detector    │   │
+                          │           │         │ + Step Segmenter      │   │
+                          │           │         └────────────┬─────────┘   │
+                          │           │                      │              │
+                          │           │              asyncio.Queue           │
+                          │           │           (typed stream events)      │
+                          │           │                      │              │
+                          │  ┌────────▼──────────────────────▼──────────┐   │
+                          │  │          Stream Processor (consumer)      │   │
+                          │  │                                          │   │
+                          │  │  Phase 1: Prompt Summary (cached/live)   │   │
+                          │  │  Phase 2: Reasoning Step 1 → summarise   │──▶ SSE
+                          │  │           Reasoning Step 2 → summarise   │   │
+                          │  │           Reasoning Step N → summarise   │   │
+                          │  │  Phase 3: Output tokens (buffered)       │   │
+                          │  └──────────────────────────────────────────┘   │
+                          └────────────────────────────────────────────────┘
 ```
 
 ### Data Flow
@@ -78,8 +90,9 @@ Profiles are resolved automatically from the `model` field, or can be overridden
 - **Reasoning tokens precede output tokens.** The detector assumes reasoning appears at the beginning of the stream (before the final answer), which is the standard pattern for all major reasoning models.
 - **`<think>` tags are the dominant reasoning marker.** For models that don't use a separate delta field, `<think>...</think>` is the default detection pattern. This covers DeepSeek-R1, Qwen QwQ, Qwen3, and most open-source reasoning models.
 - **If no reasoning is detected within a configurable threshold (default 500 chars), the content is treated as output.** This threshold is configurable per reasoning profile via `no_reasoning_threshold`, accommodating models that emit preambles before `<think>`.
+- **Reasoning steps are segmented by paragraph breaks, numbered markers, and character limits.** This heuristic works well for models that structure reasoning into logical paragraphs (DeepSeek-R1, QwQ). Models with stream-of-consciousness reasoning will get forced splits at 600 chars. Step boundaries are configurable (`STEP_MAX_CHARS`, `STEP_MIN_CHARS`).
 - **The gateway transparently forwards unknown request fields** (e.g., `tools`, `response_format`, `seed`) to the upstream, ensuring compatibility with tool-calling and structured output use cases.
-- **The summariser LLM is fast and cheap.** Summaries are generated by a separate (potentially smaller) model. In production, this would be something like `gpt-4o-mini` or a small local model.
+- **The summariser LLM is fast and cheap.** Step-level summaries use `max_tokens=100` (1 sentence per step). In production, this would be `gpt-4o-mini` or a small local model — step summaries need to return faster than the upstream generates the next step.
 
 ## SSE Protocol
 
@@ -125,12 +138,13 @@ data: [DONE]
 | Prompt summarisation fails/times out | Phase 1 emits `[Prompt summary unavailable]`, continues to Phase 2+3 |
 | Upstream connection fails | Gateway returns error in SSE stream with descriptive message |
 | Upstream returns non-200 | Error forwarded in stream, connection closed |
-| Reasoning detection finds nothing | Phase 2 is skipped entirely |
-| Reasoning summarisation fails | Phase 2 emits `[Reasoning summary unavailable]`, continues to Phase 3 |
+| Reasoning detection finds nothing | Phase 2 (reasoning steps) is skipped entirely |
+| Individual step summary fails | That step emits `[Step summary unavailable]`, remaining steps + Phase 3 continue |
 | Warm session summary pre-computed | Phase 1 served from cache (near-zero latency) |
 | Warm session expired or not found | Falls back to live prompt summarisation |
 | KV cache warming fails | Logged as warning; upstream still works (just slower) |
 | Reasoning block never closes | Content treated as output (no reasoning extracted) |
+| Queue read timeout | Gateway emits timeout error in stream, closes connection |
 
 ## Quick Start
 
@@ -231,8 +245,8 @@ Standard OpenAI-compatible body, plus optional gateway extensions:
 |---|---|---|---|
 | `model` | string | required | Model identifier |
 | `messages` | array | required | Chat messages |
-| `include_prompt_summary` | bool | `true` | Enable/disable Phase 1 |
-| `include_reasoning_summary` | bool | `true` | Enable/disable Phase 2 |
+| `include_prompt_summary` | bool | `true` | Enable/disable Phase 1 (prompt summary) |
+| `include_reasoning_summary` | bool | `true` | Enable/disable Phase 2 (reasoning step summaries) |
 | `reasoning_profile` | string | auto | Override reasoning detection profile |
 | `session_id` | string | null | Attach to a pre-warmed session |
 | *(all other OpenAI fields)* | | | Forwarded to upstream |
@@ -259,8 +273,8 @@ Proxies the upstream model listing.
 | `GW_SUMMARISER_BASE_URL` | *(upstream)* | Summariser API (can be different) |
 | `GW_SUMMARISER_API_KEY` | *(upstream key)* | Summariser API key |
 | `GW_SUMMARISER_MODEL` | `gpt-4o-mini` | Model used for summaries |
-| `GW_ENABLE_PROMPT_SUMMARY` | `true` | Global toggle for Phase 1 |
-| `GW_ENABLE_REASONING_SUMMARY` | `true` | Global toggle for Phase 2 |
+| `GW_ENABLE_PROMPT_SUMMARY` | `true` | Global toggle for Phase 1 (prompt summary) |
+| `GW_ENABLE_REASONING_SUMMARY` | `true` | Global toggle for Phase 2 (reasoning step summaries) |
 | `GW_CORS_ORIGINS` | `*` | Comma-separated allowed origins (e.g., `https://app.example.com`) |
 | `GW_LOG_LEVEL` | `INFO` | Logging level |
 
@@ -277,18 +291,18 @@ python -m pytest tests/ -v
 ├── gateway/
 │   ├── __init__.py
 │   ├── config.py              # Settings, model profiles, reasoning patterns
-│   ├── models.py              # Pydantic request/response schemas
-│   ├── reasoning.py           # Reasoning token detection (pattern + delta field)
-│   ├── stream_processor.py    # Core orchestration engine
-│   ├── summarizer.py          # Streaming LLM summariser
+│   ├── models.py              # Pydantic request/response schemas (extra="allow")
+│   ├── reasoning.py           # Reasoning detection + step segmentation
+│   ├── stream_processor.py    # Interleaved pipeline (asyncio.Queue producer/consumer)
+│   ├── summarizer.py          # Streaming LLM summariser (prompt + step-level)
 │   ├── warmup.py              # Session pre-warming manager (KV cache + summary cache)
-│   └── server.py              # FastAPI application
+│   └── server.py              # FastAPI application + session endpoints
 ├── tests/
-│   ├── test_reasoning.py      # Unit tests for reasoning detection
+│   ├── test_reasoning.py      # Step detection, profiles, field forwarding
 │   ├── test_server.py         # API integration tests (incl. warmup endpoints)
 │   └── test_warmup.py         # Session manager unit tests
-├── client.py                  # Demo client with rich terminal output (--warm flag)
-├── mock_upstream.py           # Mock /chat/completions server for testing
+├── client.py                  # Demo client with step-numbered rendering (--warm flag)
+├── mock_upstream.py           # Mock /chat/completions with multi-step reasoning
 ├── run_demo.sh                # One-command full demo
 ├── Dockerfile
 ├── docker-compose.yml
@@ -305,15 +319,17 @@ python -m pytest tests/ -v
 
 3. **Session pre-warming** – For apps with known system prompts, pre-computing the summary and warming the KV cache before the user submits eliminates Phase 1 latency entirely. The session API is intentionally simple (create → use → auto-expire) to minimize integration overhead.
 
-3. **Model-agnostic reasoning detection** – Profile-based system means adding support for a new model family is a 5-line config change, not a code change.
+4. **Model-agnostic reasoning detection** – Profile-based system means adding support for a new model family is a 5-line config change, not a code change.
 
-4. **Graceful degradation everywhere** – Every phase can fail independently without killing the response. Summaries are enhancement, not critical path. Warm sessions that expire or fail silently fall back to live computation.
+5. **Graceful degradation everywhere** – Every phase can fail independently without killing the response. Summaries are enhancement, not critical path. Warm sessions that expire or fail silently fall back to live computation. Individual reasoning step summaries can fail without affecting other steps.
 
-5. **OpenAI-compatible SSE with phase extensions** – Existing clients work unchanged; phase-aware clients get structured output. No breaking changes required.
+6. **OpenAI-compatible SSE with phase extensions** – Existing clients work unchanged; phase-aware clients get structured output via `event: phase` markers with step numbers. No breaking changes required.
 
-6. **Separate summariser endpoint** – The summariser can point to a different (cheaper, faster) model than the upstream. In production, you'd use a small model for summaries and the expensive reasoning model for the actual task.
+7. **Separate summariser endpoint** – The summariser can point to a different (cheaper, faster) model than the upstream. In production, you'd use a small model for summaries and the expensive reasoning model for the actual task.
 
-7. **Buffered reasoning detection** – Rather than making inline decisions per-token (risky at chunk boundaries), the detector buffers until it can make confident classification decisions. This prevents misclassification when `</think>` is split across SSE chunks.
+8. **asyncio.Queue-based producer/consumer** – The upstream reader (producer) and SSE writer (consumer) are decoupled via a typed event queue. This enables true concurrency — step summarisation happens inline without blocking upstream reading, and the architecture naturally extends to adding backpressure via bounded queue sizes.
+
+9. **Transparent field forwarding** – `GatewayRequest` uses `extra="allow"` to forward any unknown OpenAI-compatible fields (`tools`, `response_format`, `seed`, `logprobs`) to the upstream. The gateway never silently drops fields, ensuring compatibility with tool-calling and structured output use cases.
 
 ## Production Hardening (What I Chose Not to Build, and Why)
 
