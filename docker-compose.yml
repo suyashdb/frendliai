@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  # Mock upstream LLM (simulates /chat/completions with reasoning tokens)
+  mock-upstream:
+    build: .
+    command: python mock_upstream.py
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:9000/health')"]
+      interval: 5s
+      retries: 3
+
+  # The reasoning gateway
+  gateway:
+    build: .
+    command: python -m gateway.server
+    ports:
+      - "8000:8000"
+    environment:
+      GW_UPSTREAM_BASE_URL: "http://mock-upstream:9000/v1"
+      GW_UPSTREAM_API_KEY: "mock-key"
+      GW_SUMMARISER_BASE_URL: "http://mock-upstream:9000/v1"
+      GW_SUMMARISER_API_KEY: "mock-key"
+      GW_SUMMARISER_MODEL: "gpt-4o-mini"
+      GW_LOG_LEVEL: "INFO"
+    depends_on:
+      mock-upstream:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 5s
+      retries: 3
