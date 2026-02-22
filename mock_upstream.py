@@ -33,12 +33,24 @@ app = FastAPI(title="Mock Upstream LLM")
 REASONING_RESPONSE = {
     "reasoning": (
         "<think>\n"
-        "The user is asking about the capital of France.\n"
-        "Let me recall: France is a country in Western Europe.\n"
-        "Its capital city is Paris, which has been the capital since the 10th century.\n"
-        "Paris is also the largest city in France with a population of about 2.1 million "
-        "in the city proper.\n"
-        "I'm confident the answer is Paris.\n"
+        "The user is asking about the capital of France. Let me think through this "
+        "carefully. France is a country in Western Europe, one of the founding members "
+        "of the European Union, and has a rich history spanning over a thousand years. "
+        "The question is about its capital city, which is a fundamental geographic fact.\n\n"
+        "Let me recall the key facts about France's capital. Paris has served as the "
+        "capital of France since the late 10th century when Hugh Capet established it "
+        "as the seat of the Capetian dynasty. The city is situated on the Seine River "
+        "in the north-central part of the country. It has grown from a small settlement "
+        "on the Île de la Cité to one of the world's greatest metropolises.\n\n"
+        "Now let me verify this against what I know about French administrative "
+        "structure. France is divided into 13 metropolitan regions, and Paris serves "
+        "as both the national capital and the capital of the Île-de-France region. "
+        "The city proper has a population of about 2.1 million people, while the "
+        "greater metropolitan area is home to over 12 million, making it the largest "
+        "urban area in the European Union.\n\n"
+        "I'm confident the answer is Paris. There is no ambiguity here — Paris has "
+        "been the undisputed capital of France for over a millennium and continues "
+        "to serve as the political, economic, and cultural heart of the nation.\n"
         "</think>"
     ),
     "output": (
@@ -56,8 +68,11 @@ SIMPLE_RESPONSE = (
 
 SUMMARY_RESPONSE_PROMPT = "The user asks about the capital of France."
 SUMMARY_RESPONSE_REASONING = (
-    "The model recalled geographic knowledge about France, confirmed Paris "
-    "as the capital, and noted its historical significance."
+    "Recalled that Paris is the capital, verified its historical role since the 10th century, "
+    "and confirmed it as the political and economic centre of France."
+)
+SUMMARY_RESPONSE_STEP = (
+    "Identified the core geographic fact and confirmed with historical context."
 )
 
 
@@ -126,9 +141,11 @@ async def chat_completions(request: Request):
 
     # Choose response
     if is_summary_request:
-        # Check if it's a reasoning summary or prompt summary
         user_msg = messages[-1].get("content", "") if messages else ""
-        if "<think>" in user_msg or "chain-of-thought" in user_msg.lower():
+        if "one step" in messages[0].get("content", "").lower():
+            # Step-level summary request
+            text = SUMMARY_RESPONSE_STEP
+        elif "<think>" in user_msg or "chain-of-thought" in user_msg.lower():
             text = SUMMARY_RESPONSE_REASONING
         else:
             text = SUMMARY_RESPONSE_PROMPT

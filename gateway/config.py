@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # CORS – configurable for production deployments
+    cors_origins: str = "*"  # comma-separated list or "*"
+
     model_config = {"env_prefix": "GW_", "env_file": ".env", "extra": "ignore"}
 
     @property
@@ -68,6 +71,10 @@ class ReasoningProfile:
     # Some models emit reasoning as a separate field (e.g., `reasoning_content`)
     # If set, we look for this key in the delta instead of pattern-matching content.
     delta_field: str | None = None
+    # How many chars to accumulate before concluding there's no reasoning.
+    # Some models emit a preamble (acknowledgment, greeting) before <think>.
+    # Set higher for models with longer preambles.
+    no_reasoning_threshold: int = 500
 
 
 # Pre-built profiles for popular reasoning models

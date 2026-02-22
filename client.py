@@ -43,9 +43,18 @@ def parse_args():
 
 PHASE_STYLES = {
     "prompt_summary": {"color": "cyan", "title": "📋 Prompt Summary", "border": "cyan"},
-    "reasoning_summary": {"color": "yellow", "title": "🧠 Reasoning Summary", "border": "yellow"},
+    "reasoning_summary": {"color": "yellow", "title": "🧠 Reasoning", "border": "yellow"},
     "output": {"color": "green", "title": "✅ Response", "border": "green"},
 }
+
+
+def _phase_title(phase: str, label: str, step: int | None = None) -> str:
+    """Build display title for a phase, including step number if present."""
+    style = PHASE_STYLES.get(phase, {})
+    base_title = style.get("title", label)
+    if step is not None:
+        return f"{base_title} (Step {step})"
+    return base_title
 
 
 def warm_session(
@@ -120,7 +129,9 @@ def stream_gateway(
     url = f"{gateway_url.rstrip('/')}/v1/chat/completions"
 
     current_phase = None
+    current_phase_key = None  # unique key per phase instance
     phase_contents: dict[str, str] = {}
+    phase_labels: dict[str, str] = {}
 
     console.print()
     console.rule("[bold blue]FriendliAI Reasoning Gateway[/bold blue]")
@@ -162,10 +173,23 @@ def stream_gateway(
                     # Check if this is a phase event
                     if "phase" in data and "label" in data:
                         # Flush previous phase
-                        if current_phase and current_phase in phase_contents:
-                            _render_phase(current_phase, phase_contents[current_phase])
-                        current_phase = data["phase"]
-                        phase_contents[current_phase] = ""
+                        if current_phase_key and current_phase_key in phase_contents:
+                            _render_phase(
+                                current_phase,
+                                phase_contents[current_phase_key],
+                                phase_labels.get(current_phase_key, ""),
+                            )
+
+                        phase = data["phase"]
+                        step = data.get("step")
+                        label = data.get("label", "")
+                        # Create unique key (reasoning_summary can appear multiple times)
+                        phase_key = f"{phase}_{step}" if step else phase
+                        current_phase = phase
+                        current_phase_key = phase_key
+                        phase_contents[phase_key] = ""
+                        title = _phase_title(phase, label, step)
+                        phase_labels[phase_key] = title
                         continue
 
                     # Regular content chunk
@@ -174,31 +198,35 @@ def stream_gateway(
                         continue
                     delta = choices[0].get("delta", {})
                     content = delta.get("content")
-                    if content and current_phase:
-                        phase_contents[current_phase] = (
-                            phase_contents.get(current_phase, "") + content
+                    if content and current_phase_key:
+                        phase_contents[current_phase_key] = (
+                            phase_contents.get(current_phase_key, "") + content
                         )
-                        # Live-print token
                         style = PHASE_STYLES.get(current_phase, {})
                         console.print(content, end="", style=style.get("color", "white"))
 
     # Flush final phase
     console.print()  # newline after streaming
-    if current_phase and current_phase in phase_contents:
-        _render_phase(current_phase, phase_contents[current_phase])
+    if current_phase_key and current_phase_key in phase_contents:
+        _render_phase(
+            current_phase,
+            phase_contents[current_phase_key],
+            phase_labels.get(current_phase_key, ""),
+        )
 
     console.print()
     console.rule("[bold blue]Done[/bold blue]")
 
 
-def _render_phase(phase: str, content: str):
+def _render_phase(phase: str, content: str, title: str = ""):
     """Render a completed phase as a panel."""
     style = PHASE_STYLES.get(phase, {"title": phase, "border": "white"})
+    display_title = title or style.get("title", phase)
     console.print()
     console.print(
         Panel(
             content.strip(),
-            title=style["title"],
+            title=display_title,
             border_style=style["border"],
             padding=(0, 1),
         )

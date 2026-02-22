@@ -45,6 +45,8 @@ class GatewayRequest(BaseModel):
     # Attach to a pre-warmed session (from POST /v1/sessions/warm)
     session_id: str | None = None
 
+    model_config = {"extra": "allow"}
+
     def to_upstream_body(self) -> dict[str, Any]:
         """Build the body forwarded to the upstream /chat/completions API."""
         body: dict[str, Any] = {
@@ -52,6 +54,7 @@ class GatewayRequest(BaseModel):
             "messages": [m.model_dump(exclude_none=True) for m in self.messages],
             "stream": True,  # always stream from upstream
         }
+        # Standard optional fields
         for opt in (
             "temperature", "top_p", "max_tokens", "stop",
             "presence_penalty", "frequency_penalty", "user",
@@ -59,6 +62,15 @@ class GatewayRequest(BaseModel):
             val = getattr(self, opt)
             if val is not None:
                 body[opt] = val
+        # Forward any extra fields (tools, response_format, seed, logprobs, etc.)
+        gateway_only = {
+            "include_prompt_summary", "include_reasoning_summary",
+            "reasoning_profile", "session_id", "stream",
+        }
+        if self.model_extra:
+            for key, val in self.model_extra.items():
+                if key not in gateway_only:
+                    body[key] = val
         return body
 
 
@@ -93,6 +105,7 @@ class PhaseEvent(BaseModel):
     """Custom SSE event marking a new output phase."""
     phase: Literal["prompt_summary", "reasoning_summary", "output"]
     label: str
+    step: int | None = None  # Step number for incremental reasoning summaries
 
     def to_sse_bytes(self) -> bytes:
         return f"event: phase\ndata: {self.model_dump_json()}\n\n".encode()

@@ -40,6 +40,13 @@ REASONING_SUMMARY_SYSTEM = (
     "Be direct and brief."
 )
 
+REASONING_STEP_SYSTEM = (
+    "You are a concise summariser. You will receive one step from an AI model's "
+    "internal reasoning process. Summarise this step in exactly 1 sentence. "
+    "Capture the core insight or action. Be extremely brief and direct. "
+    "Do NOT use phrases like 'The model...' — just state the reasoning point."
+)
+
 
 class Summariser:
     """Async streaming summariser backed by a /chat/completions endpoint."""
@@ -81,10 +88,9 @@ class Summariser:
         reasoning_text: str,
         client: httpx.AsyncClient,
     ) -> AsyncIterator[str]:
-        """Stream a summary of the model's reasoning."""
+        """Stream a summary of the model's full reasoning (fallback for non-step mode)."""
         if not reasoning_text.strip():
             return
-        # Truncate very long reasoning to avoid blowing context
         truncated = reasoning_text[:12_000]
         async for token in self._stream_summary(
             system=REASONING_SUMMARY_SYSTEM,
@@ -93,11 +99,35 @@ class Summariser:
         ):
             yield token
 
+    async def summarise_reasoning_step(
+        self,
+        step_text: str,
+        step_index: int,
+        client: httpx.AsyncClient,
+    ) -> AsyncIterator[str]:
+        """
+        Stream a 1-sentence summary of a single reasoning step.
+
+        Designed for low latency — uses fewer max_tokens and a tighter prompt
+        so the summariser returns fast.
+        """
+        if not step_text.strip():
+            return
+        truncated = step_text[:3_000]
+        async for token in self._stream_summary(
+            system=REASONING_STEP_SYSTEM,
+            user_text=truncated,
+            client=client,
+            max_tokens=100,  # 1 sentence = ~30-60 tokens, cap at 100
+        ):
+            yield token
+
     async def _stream_summary(
         self,
         system: str,
         user_text: str,
         client: httpx.AsyncClient,
+        max_tokens: int = 256,
     ) -> AsyncIterator[str]:
         """Low-level: call the summariser model with streaming."""
         url = f"{self._base_url}/chat/completions"
@@ -112,7 +142,7 @@ class Summariser:
                 {"role": "user", "content": user_text},
             ],
             "stream": True,
-            "max_tokens": 256,
+            "max_tokens": max_tokens,
             "temperature": 0.3,
         }
 
