@@ -166,10 +166,15 @@ python mock_upstream.py
 # Starts on :9000
 ```
 
-Terminal 2 – Gateway:
+Terminal 2 – Gateway (inline env vars, or use a `.env` file):
 ```bash
+# Option A: inline
 GW_UPSTREAM_BASE_URL="http://localhost:9000/v1" \
 GW_SUMMARISER_BASE_URL="http://localhost:9000/v1" \
+python -m gateway.server
+
+# Option B: .env file (copy and edit the provided example)
+cp .env.example .env
 python -m gateway.server
 # Starts on :8000
 ```
@@ -285,6 +290,13 @@ pip install pytest pytest-asyncio
 python -m pytest tests/ -v
 ```
 
+`pytest.ini` sets `asyncio_mode = auto` so async tests work without any extra decorators. If you're using `pyproject.toml` instead, add:
+
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+```
+
 ## Project Structure
 
 ```
@@ -307,7 +319,9 @@ python -m pytest tests/ -v
 ├── Dockerfile
 ├── docker-compose.yml
 ├── Makefile
+├── pytest.ini                 # asyncio_mode = auto (required for async tests)
 ├── requirements.txt
+├── .env.example               # All config vars with defaults and comments
 └── README.md
 ```
 
