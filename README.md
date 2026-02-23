@@ -274,6 +274,7 @@ Proxies the upstream model listing.
 | `GW_PORT` | `8000` | Server port |
 | `GW_UPSTREAM_BASE_URL` | `http://localhost:9000/v1` | Upstream API base URL |
 | `GW_UPSTREAM_API_KEY` | `no-key` | Upstream API key |
+| `GW_UPSTREAM_ENDPOINT_ID` | `null` | FriendliAI dedicated endpoint ID — when set, appended to URL path and `model` field omitted from request body |
 | `GW_UPSTREAM_TIMEOUT_S` | `120` | Upstream request timeout |
 | `GW_SUMMARISER_BASE_URL` | *(upstream)* | Summariser API (can be different) |
 | `GW_SUMMARISER_API_KEY` | *(upstream key)* | Summariser API key |

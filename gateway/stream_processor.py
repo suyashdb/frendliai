@@ -167,23 +167,23 @@ async def _upstream_producer(
                         continue
                     events = detector.feed(content)
                     for ev_type, *ev_data in events:
+                        logger.debug("detector event: %s state=%s", ev_type, detector.state)
                         if ev_type == "reasoning_step":
+                            logger.info("reasoning_step #%d len=%d", ev_data[0].index, len(ev_data[0].text))
                             await queue.put(EvReasoningStep(step=ev_data[0]))
                         elif ev_type == "output":
                             await queue.put(EvOutput(text=ev_data[0]))
                         elif ev_type == "reasoning_ended":
+                            logger.info("reasoning_ended, steps=%d", detector.step_count)
                             await queue.put(EvReasoningEnded())
                         # "buffered" events are internal to the detector
 
         # Finalize detector — flush remaining content
         if isinstance(detector, StreamingReasoningDetector):
             result = detector.finalize()
-            # If there are output tokens from finalization, push them
             if result.output_tokens:
                 for t in result.output_tokens:
-                    # Avoid duplicates — only push if detector was in INIT state
-                    if detector.state == "INIT" or (not detector.has_reasoning and detector.state != "OUTPUT"):
-                        await queue.put(EvOutput(text=t))
+                    await queue.put(EvOutput(text=t))
 
     except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
         logger.error("Upstream connection failed: %s", exc)
@@ -247,7 +247,28 @@ async def process_stream(
     # Start upstream producer (pushes events to queue)
     # ------------------------------------------------------------------
     queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
-    upstream_url = f"{settings.upstream_base_url.rstrip('/')}/chat/completions"
+
+    # Build upstream URL — dedicated endpoints embed the endpoint ID in the path
+    if settings.upstream_endpoint_id:
+        upstream_url = (
+            f"{settings.upstream_base_url.rstrip('/')}/"
+            f"{settings.upstream_endpoint_id}/chat/completions"
+        )
+        upstream_body = request.to_upstream_body(include_model=False)
+        logger.debug("Using dedicated endpoint: %s", upstream_url)
+    else:
+        upstream_url = f"{settings.upstream_base_url.rstrip('/')}/chat/completions"
+        upstream_body = request.to_upstream_body(include_model=True)
+
+    # FriendliAI: for reasoning models, inject parse_reasoning=True (splits thinking
+    # into reasoning_content delta field) and enable_thinking=True via chat_template_kwargs.
+    if profile.delta_field:
+        if "parse_reasoning" not in upstream_body:
+            upstream_body["parse_reasoning"] = True
+        if "chat_template_kwargs" not in upstream_body:
+            upstream_body["chat_template_kwargs"] = {"enable_thinking": True}
+        logger.debug("Injected parse_reasoning + enable_thinking for profile %s", profile.name)
+
     upstream_headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {settings.upstream_api_key}",
@@ -258,7 +279,7 @@ async def process_stream(
             queue=queue,
             upstream_url=upstream_url,
             upstream_headers=upstream_headers,
-            upstream_body=request.to_upstream_body(),
+            upstream_body=upstream_body,
             settings=settings,
             http_client=http_client,
             profile=profile,
@@ -308,25 +329,28 @@ async def process_stream(
         # --- Reasoning step detected ---
         if isinstance(event, EvReasoningStep):
             if include_reasoning:
-                reasoning_step_count += 1
                 step = event.step
-                yield PhaseEvent(
-                    phase="reasoning_summary",
-                    label=f"Reasoning Step {reasoning_step_count}",
-                    step=reasoning_step_count,
-                ).to_sse_bytes()
-
-                # Summarise this step inline — stream tokens to client
+                # Collect tokens first — skip the step entirely if summary is empty
+                step_tokens: list[str] = []
                 try:
                     async for t in summariser.summarise_reasoning_step(
                         step.text, step.index, http_client
                     ):
-                        yield _make_chunk(completion_id, model, t).to_sse_bytes()
+                        step_tokens.append(t)
                 except Exception as exc:
-                    logger.warning("Step %d summary failed: %s", reasoning_step_count, exc)
-                    yield _make_chunk(
-                        completion_id, model, "[Step summary unavailable]"
+                    logger.warning("Step summary failed: %s", exc)
+
+                if not "".join(step_tokens).strip():
+                    logger.debug("Skipping empty reasoning step (index=%d)", step.index)
+                else:
+                    reasoning_step_count += 1
+                    yield PhaseEvent(
+                        phase="reasoning_summary",
+                        label=f"Reasoning Step {reasoning_step_count}",
+                        step=reasoning_step_count,
                     ).to_sse_bytes()
+                    for t in step_tokens:
+                        yield _make_chunk(completion_id, model, t).to_sse_bytes()
 
         # --- Reasoning block ended ---
         elif isinstance(event, EvReasoningEnded):

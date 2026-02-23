@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     upstream_api_key: str = "no-key"
     upstream_timeout_s: float = 120.0
     upstream_connect_timeout_s: float = 10.0
+    # For FriendliAI dedicated endpoints: set this to your endpoint ID
+    # (e.g. depjs3iq370hmqt). When set, the gateway appends it to the URL
+    # path and omits the `model` field from the upstream request body.
+    upstream_endpoint_id: str | None = None
 
     # Summariser – can point to a different (cheaper/faster) model
     summariser_base_url: str | None = None  # defaults to upstream_base_url
@@ -112,11 +116,13 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
 }
 
 # Mapping from model name substrings → profile key.  Checked in order.
+# FriendliAI serverless supports parse_reasoning via stream_options, which
+# returns reasoning in a separate reasoning_content delta field.
 MODEL_PROFILE_MAP: list[tuple[str, str]] = [
-    ("deepseek-r1", "deepseek-r1"),
-    ("deepseek-reasoner", "deepseek-r1"),
-    ("qwq", "qwen-qwq"),
-    ("qwen3", "think-tag"),
+    ("deepseek-r1", "reasoning-field"),
+    ("deepseek-reasoner", "reasoning-field"),
+    ("qwq", "reasoning-field"),
+    ("qwen3", "reasoning-field"),
     ("o1", "reasoning-field"),
     ("o3", "reasoning-field"),
     ("o4", "reasoning-field"),

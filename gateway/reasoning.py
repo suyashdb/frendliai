@@ -174,7 +174,7 @@ class StreamingReasoningDetector:
 
         for pattern in STEP_BOUNDARY_PATTERNS:
             match = pattern.search(self._pending_step_text)
-            if match and match.start() >= STEP_MIN_CHARS:
+            if match:
                 step_text = self._pending_step_text[:match.start()].strip()
                 remaining = self._pending_step_text[match.end():]
 

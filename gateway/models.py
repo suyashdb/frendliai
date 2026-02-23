@@ -47,13 +47,16 @@ class GatewayRequest(BaseModel):
 
     model_config = {"extra": "allow"}
 
-    def to_upstream_body(self) -> dict[str, Any]:
+    def to_upstream_body(self, include_model: bool = True) -> dict[str, Any]:
         """Build the body forwarded to the upstream /chat/completions API."""
         body: dict[str, Any] = {
-            "model": self.model,
             "messages": [m.model_dump(exclude_none=True) for m in self.messages],
             "stream": True,  # always stream from upstream
         }
+        # Only include model field for serverless endpoints.
+        # Dedicated endpoints identify the model via the URL path.
+        if include_model:
+            body["model"] = self.model
         # Standard optional fields
         for opt in (
             "temperature", "top_p", "max_tokens", "stop",

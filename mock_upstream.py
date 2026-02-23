@@ -71,7 +71,29 @@ SUMMARY_RESPONSE_REASONING = (
     "Recalled that Paris is the capital, verified its historical role since the 10th century, "
     "and confirmed it as the political and economic centre of France."
 )
-SUMMARY_RESPONSE_STEP = (
+
+# Per-step summaries keyed by a distinctive phrase found in each reasoning paragraph.
+# The mock picks the first match so each step gets a unique, contextually relevant summary.
+STEP_SUMMARY_MAP: list[tuple[str, str]] = [
+    (
+        "founding members",
+        "Framed the question as a geographic fact about France, a major Western European nation.",
+    ),
+    (
+        "hugh capet",
+        "Recalled that Paris became the capital in the late 10th century under the Capetian dynasty, situated on the Seine.",
+    ),
+    (
+        "13 metropolitan",
+        "Verified Paris is both the national capital and the capital of Île-de-France, with 2.1M city / 12M metro population.",
+    ),
+    (
+        "undisputed capital",
+        "Concluded with confidence: Paris has been the unambiguous capital for over a millennium.",
+    ),
+]
+# Fallback if no keyword matches
+SUMMARY_RESPONSE_STEP_DEFAULT = (
     "Identified the core geographic fact and confirmed with historical context."
 )
 
@@ -141,10 +163,16 @@ async def chat_completions(request: Request):
 
     # Choose response
     if is_summary_request:
+        system_msg = messages[0].get("content", "").lower() if messages else ""
         user_msg = messages[-1].get("content", "") if messages else ""
-        if "one step" in messages[0].get("content", "").lower():
-            # Step-level summary request
-            text = SUMMARY_RESPONSE_STEP
+        if "one step" in system_msg:
+            # Step-level summary — pick based on content of the step text
+            user_msg_lower = user_msg.lower()
+            text = SUMMARY_RESPONSE_STEP_DEFAULT
+            for keyword, summary in STEP_SUMMARY_MAP:
+                if keyword in user_msg_lower:
+                    text = summary
+                    break
         elif "<think>" in user_msg or "chain-of-thought" in user_msg.lower():
             text = SUMMARY_RESPONSE_REASONING
         else:

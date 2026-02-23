@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import AsyncIterator
 
 import httpx
@@ -129,7 +130,12 @@ class Summariser:
         client: httpx.AsyncClient,
         max_tokens: int = 256,
     ) -> AsyncIterator[str]:
-        """Low-level: call the summariser model with streaming."""
+        """Low-level: call the summariser model with streaming.
+
+        Buffers the full response before yielding so that <think>...</think>
+        blocks emitted by reasoning summariser models (e.g. Qwen3) are stripped
+        before the tokens reach the client.
+        """
         url = f"{self._base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -166,21 +172,35 @@ class Summariser:
                         attempt += 1
                         continue
 
+                    raw_tokens: list[str] = []
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
                             continue
                         payload = line[6:].strip()
                         if payload == "[DONE]":
-                            return
+                            break
                         try:
                             chunk = json.loads(payload)
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
                             token = delta.get("content")
                             if token:
-                                yield token
+                                raw_tokens.append(token)
                         except (json.JSONDecodeError, IndexError, KeyError):
                             continue
-                    return  # stream completed normally
+
+                    # Strip <think>...</think> blocks emitted by reasoning
+                    # summariser models (e.g. Qwen3) before forwarding to client
+                    full_text = "".join(raw_tokens)
+                    clean_text = re.sub(
+                        r"<think>.*?</think>\s*", "", full_text,
+                        flags=re.DOTALL | re.IGNORECASE,
+                    ).strip()
+
+                    # Yield in small chunks to preserve streaming feel
+                    chunk_size = 4
+                    for i in range(0, len(clean_text), chunk_size):
+                        yield clean_text[i : i + chunk_size]
+                    return
 
             except (httpx.TimeoutException, httpx.ConnectError) as exc:
                 logger.warning(

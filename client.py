@@ -19,12 +19,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 
 import httpx
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
-from rich.text import Text
 
 console = Console()
 
@@ -132,12 +131,15 @@ def stream_gateway(
     current_phase_key = None  # unique key per phase instance
     phase_contents: dict[str, str] = {}
     phase_labels: dict[str, str] = {}
+    phase_start_times: dict[str, float] = {}
+    request_start = time.time()
 
     console.print()
     console.rule("[bold blue]FriendliAI Reasoning Gateway[/bold blue]")
     warm_tag = " | [bold green]🔥 WARM SESSION[/bold green]" if session_id else ""
     console.print(f"[dim]Model: {model} | Gateway: {gateway_url}[/dim]{warm_tag}")
     console.print(f"[dim]Prompt: {prompt}[/dim]")
+    console.print(f"[dim]Request started: {_ts()}[/dim]")
     console.print()
 
     with httpx.Client(timeout=120.0) as client:
@@ -172,24 +174,28 @@ def stream_gateway(
 
                     # Check if this is a phase event
                     if "phase" in data and "label" in data:
-                        # Flush previous phase
+                        # Flush previous phase with timing
                         if current_phase_key and current_phase_key in phase_contents:
+                            elapsed = time.time() - phase_start_times.get(current_phase_key, request_start)
                             _render_phase(
                                 current_phase,
                                 phase_contents[current_phase_key],
                                 phase_labels.get(current_phase_key, ""),
+                                elapsed=elapsed,
+                                start_ts=phase_start_times.get(current_phase_key),
                             )
 
                         phase = data["phase"]
                         step = data.get("step")
                         label = data.get("label", "")
-                        # Create unique key (reasoning_summary can appear multiple times)
                         phase_key = f"{phase}_{step}" if step else phase
                         current_phase = phase
                         current_phase_key = phase_key
                         phase_contents[phase_key] = ""
                         title = _phase_title(phase, label, step)
                         phase_labels[phase_key] = title
+                        phase_start_times[phase_key] = time.time()
+                        console.print(f"\n[dim]⏱  {title} started at {_ts()}[/dim]")
                         continue
 
                     # Regular content chunk
@@ -208,25 +214,35 @@ def stream_gateway(
     # Flush final phase
     console.print()  # newline after streaming
     if current_phase_key and current_phase_key in phase_contents:
+        elapsed = time.time() - phase_start_times.get(current_phase_key, request_start)
         _render_phase(
             current_phase,
             phase_contents[current_phase_key],
             phase_labels.get(current_phase_key, ""),
+            elapsed=elapsed,
+            start_ts=phase_start_times.get(current_phase_key),
         )
 
+    total = time.time() - request_start
     console.print()
-    console.rule("[bold blue]Done[/bold blue]")
+    console.rule(f"[bold blue]Done — total {total:.2f}s[/bold blue]")
 
 
-def _render_phase(phase: str, content: str, title: str = ""):
-    """Render a completed phase as a panel."""
+def _ts() -> str:
+    """Current timestamp string for debug output."""
+    return time.strftime("%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}"
+
+
+def _render_phase(phase: str, content: str, title: str = "", elapsed: float = 0.0, start_ts: float | None = None):
+    """Render a completed phase as a panel with timing info."""
     style = PHASE_STYLES.get(phase, {"title": phase, "border": "white"})
     display_title = title or style.get("title", phase)
+    timing = f"  [dim]{elapsed:.2f}s[/dim]"
     console.print()
     console.print(
         Panel(
             content.strip(),
-            title=display_title,
+            title=f"{display_title}{timing}",
             border_style=style["border"],
             padding=(0, 1),
         )
